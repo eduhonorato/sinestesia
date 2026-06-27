@@ -11,12 +11,16 @@ const params = {
   rainbow: false,
   hueSpeed: 12,
   preset: 'Triangulo classico',
+  imgPalette: false,
   sound: false,
   volume: 0.6,
+  reactive: false,
+  reactSens: 1.2,
   auto: false,
   autoPos: false,
   autoStep: 0.18,
   holdTime: 6,
+  outputAspect: 'Livre',
 };
 
 let tri = [];
@@ -32,9 +36,25 @@ let movingSource = false;
 let autoAngle = 0;
 let wasShooting = false;
 let holdUntil = 0;
+let autoPaused = false;
 let orbitPeriod = 0;
 let hideUI = false;
+let showHelp = false;
+let vjMode = false;
 let audioCtx = null;
+
+// imagem-paleta
+let paletteImg = null;
+let fileInput = null;
+let polyBB = { minx: 0, miny: 0, maxx: 1, maxy: 1 };
+
+// modo reativo ao som
+let mic = null;
+let fft = null;
+let reactReady = false;
+let lastBeat = 0;
+let glowBoost = 0;
+let bassAvg = 0;
 
 let baseRGB = { r: 255, g: 40, b: 40 };
 function refreshColor() {
@@ -58,6 +78,8 @@ function setup() {
   buildTriangle();
   emitter = { pos: triCentroid() };
   refreshColor();
+  fileInput = createFileInput(handleFile);
+  fileInput.hide();
   setupPane();
   fireShot(createVector(0.85, -0.5));
 }
@@ -97,12 +119,17 @@ function setupPane() {
   fVis.addBinding(params, 'rainbow', { label: 'Arco-iris' }).on('change', refire);
   fVis.addBinding(params, 'hueSpeed', { min: 1, max: 60, step: 1, label: 'Matiz/refl' })
     .on('change', refire);
+  fVis.addBinding(params, 'imgPalette', { label: 'Usar imagem' }).on('change', refire);
+  fVis.addButton({ title: 'Carregar imagem...' }).on('click', () => fileInput.elt.click());
 
   // --- Áudio ---
   const fAud = pane.addFolder({ title: 'Audio' });
-  fAud.addBinding(params, 'sound', { label: 'Som' })
+  fAud.addBinding(params, 'sound', { label: 'Som (pings)' })
     .on('change', () => { if (params.sound) ensureAudio(); });
   fAud.addBinding(params, 'volume', { min: 0, max: 1, step: 0.05, label: 'Volume' });
+  fAud.addBinding(params, 'reactive', { label: 'Reativo (mic)' })
+    .on('change', () => { if (params.reactive) startReactive(); else reactReady = false; });
+  fAud.addBinding(params, 'reactSens', { min: 0.3, max: 3, step: 0.1, label: 'Sensibilidade' });
 
   // --- Automático ---
   const fAuto = pane.addFolder({ title: 'Automatico' });
@@ -119,10 +146,29 @@ function setupPane() {
   });
   fAct.addButton({ title: 'Limpar' }).on('click', () => beamLayer.clear());
 
+  // --- Saída (VJ) ---
+  const fOut = pane.addFolder({ title: 'Saida (VJ)' });
+  fOut.addBinding(params, 'outputAspect', {
+    label: 'Aspecto',
+    options: { Livre: 'Livre', '16:9': '16:9', '9:16': '9:16', '1:1': '1:1', '4:3': '4:3' },
+  }).on('change', () => { buildTriangle(); emitter.pos = triCentroid(); if (centerDir) fireShot(centerDir); });
+  fOut.addButton({ title: 'Modo VJ - tela cheia (tecla V)' }).on('click', () => setVJ(!vjMode));
+
   // --- Exportar ---
   const fExp = pane.addFolder({ title: 'Exportar' });
   fExp.addButton({ title: 'Salvar PNG' }).on('click', exportPNG);
   fExp.addButton({ title: 'Gravar GIF (3s)' }).on('click', () => saveGif('laser', 3));
+}
+
+function handleFile(file) {
+  if (file.type !== 'image') return;
+  loadImage(file.data, (img) => {
+    img.loadPixels();
+    paletteImg = img;
+    params.imgPalette = true;
+    if (pane) pane.refresh();
+    if (centerDir) fireShot(centerDir);
+  });
 }
 
 function hex2(n) { return constrain(round(n), 0, 255).toString(16).padStart(2, '0'); }
@@ -186,15 +232,35 @@ function windowResized() {
 }
 
 //  Geometria
+function stageRect() {
+  const a = params.outputAspect;
+  if (a === 'Livre') return { x: 0, y: 0, w: width, h: height };
+  const [rw, rh] = a.split(':').map(Number);
+  let w = width, h = width * rh / rw;
+  if (h > height) { h = height; w = height * rw / rh; }
+  return { x: (width - w) / 2, y: (height - h) / 2, w, h };
+}
+
 function buildTriangle() {
-  const cx = width / 2, cy = height / 2;
-  const R = min(width, height) * 0.42;
+  const st = stageRect();
+  const cx = st.x + st.w / 2, cy = st.y + st.h / 2;
+  const R = min(st.w, st.h) * 0.42;
   const n = max(3, floor(params.sides));
   tri = [];
   for (let i = 0; i < n; i++) {
     const a = -HALF_PI + i * TWO_PI / n;
     tri.push(createVector(cx + R * cos(a), cy + R * sin(a)));
   }
+  computePolyBB();
+}
+
+function computePolyBB() {
+  let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
+  for (const v of tri) {
+    minx = min(minx, v.x); miny = min(miny, v.y);
+    maxx = max(maxx, v.x); maxy = max(maxy, v.y);
+  }
+  polyBB = { minx, miny, maxx, maxy };
 }
 
 function triCentroid() {
@@ -288,6 +354,8 @@ function updateAuto() {
   }
   wasShooting = shootingNow;
 
+  if (params.reactive && reactReady && millis() - lastBeat < 3000) return;
+  if (autoPaused) return;
   if (!(params.auto || params.autoPos) || shootingNow) return;
   if (millis() < holdUntil) return;
 
@@ -328,7 +396,61 @@ function detectOrbit(origin, dir, maxCheck) {
   return 0;
 }
 
+function startReactive() {
+  if (typeof p5 === 'undefined' || typeof p5.AudioIn === 'undefined' ||
+      typeof userStartAudio !== 'function') {
+    console.warn('p5.sound não carregou; modo reativo indisponível');
+    params.reactive = false;
+    if (pane) pane.refresh();
+    return;
+  }
+  if (!mic) { mic = new p5.AudioIn(); fft = new p5.FFT(0.8, 1024); }
+  userStartAudio().then(() => {
+    mic.start(
+      () => { fft.setInput(mic); reactReady = true; bassAvg = 0; },
+      () => { console.warn('microfone negado'); reactReady = false; params.reactive = false; if (pane) pane.refresh(); }
+    );
+  });
+}
+
+function updateReactive() {
+  if (!params.reactive || !reactReady) { glowBoost = lerp(glowBoost, 0, 0.2); return; }
+  try {
+    const level = mic.getLevel();
+    fft.analyze();
+    const bass = fft.getEnergy('bass');
+    bassAvg = lerp(bassAvg, bass, 0.05);
+    const target = map(level, 0, 0.2, 0, 1.8, true) * params.reactSens;
+    glowBoost = lerp(glowBoost, target, 0.25);
+
+    const now = millis();
+    if (bass > bassAvg * 1.35 && bass > 55 && now - lastBeat > 200) {
+      lastBeat = now;
+      onBeat();
+    }
+  } catch (e) {
+    console.warn('reativo falhou:', e);
+    reactReady = false;
+    glowBoost = 0;
+  }
+}
+
+function onBeat() {
+  if (!params.rainbow) {
+    const treble = fft.getEnergy('treble');
+    params.color = rgbToHex(hsv(map(treble, 0, 255, 0, 360), 0.9, 1));
+    refreshColor();
+    if (pane) pane.refresh();
+  }
+  autoAngle += params.autoStep;
+  const d = createVector(cos(autoAngle), sin(autoAngle));
+  if (params.autoPos) emitter.pos = randomInteriorPos();
+  fireShot(d);
+}
+
 function draw() {
+  if (vjMode && !fullscreen()) setVJ(false);
+  updateReactive();
   updateAuto();
 
   const dir = centerDir || createVector(1, 0);
@@ -360,9 +482,10 @@ function draw() {
 
   background(0);
   const ctx = drawingContext;
-  if (params.glow > 0) {
+  const glowAmt = params.glow + glowBoost;
+  if (glowAmt > 0) {
     ctx.save();
-    ctx.filter = 'blur(' + (params.glow * 7) + 'px)';
+    ctx.filter = 'blur(' + (glowAmt * 7) + 'px)';
     image(fxLayer, 0, 0);
     ctx.restore();
   }
@@ -371,9 +494,27 @@ function draw() {
   image(fxLayer, 0, 0);
   pop();
 
-  if (!hideUI) {
+  drawLetterbox();
+
+  if (!hideUI && !vjMode) {
     drawEmitter();
     drawHUD(dir);
+    if (showHelp) drawHelp();
+  }
+}
+
+function drawLetterbox() {
+  const st = stageRect();
+  if (st.x === 0 && st.y === 0) return;
+  noStroke();
+  fill(0);
+  if (st.x > 0) {
+    rect(0, 0, st.x, height);
+    rect(st.x + st.w, 0, width - (st.x + st.w), height);
+  }
+  if (st.y > 0) {
+    rect(0, 0, width, st.y);
+    rect(0, st.y + st.h, width, height - (st.y + st.h));
   }
 }
 
@@ -391,18 +532,22 @@ function ensureAudio() {
 }
 
 function playPing(freq, vol) {
-  ensureAudio();
-  const t = audioCtx.currentTime;
-  const osc = audioCtx.createOscillator();
-  const g = audioCtx.createGain();
-  osc.type = 'sine';
-  osc.frequency.value = freq;
-  g.gain.setValueAtTime(0, t);
-  g.gain.linearRampToValueAtTime(vol, t + 0.005);
-  g.gain.exponentialRampToValueAtTime(0.0001, t + 0.18);
-  osc.connect(g).connect(audioCtx.destination);
-  osc.start(t);
-  osc.stop(t + 0.2);
+  try {
+    ensureAudio();
+    const t = audioCtx.currentTime;
+    const osc = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    osc.type = 'sine';
+    osc.frequency.value = freq;
+    g.gain.setValueAtTime(0, t);
+    g.gain.linearRampToValueAtTime(vol, t + 0.005);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.18);
+    osc.connect(g).connect(audioCtx.destination);
+    osc.start(t);
+    osc.stop(t + 0.2);
+  } catch (e) {
+    /* nunca deixar o áudio abortar o frame */
+  }
 }
 
 const PENTA = [0, 3, 5, 7, 10];
@@ -466,10 +611,24 @@ function hsv(h, s, v) {
 }
 
 function segBaseColor(s, b) {
+  if (params.imgPalette && paletteImg) {
+    return samplePalette((s.x1 + s.x2) / 2, (s.y1 + s.y2) / 2);
+  }
   const off = b ? b.hueOff : 0;
   if (params.rainbow) return hsv(s.idx * params.hueSpeed + off, 1, 1);
   if (beams.length > 1) return hsv(off, 1, 1);
   return baseRGB;
+}
+
+function samplePalette(x, y) {
+  const bb = polyBB;
+  const u = constrain((x - bb.minx) / max(1, bb.maxx - bb.minx), 0, 1);
+  const v = constrain((y - bb.miny) / max(1, bb.maxy - bb.miny), 0, 1);
+  const ix = floor(u * (paletteImg.width - 1));
+  const iy = floor(v * (paletteImg.height - 1));
+  const idx = 4 * (iy * paletteImg.width + ix);
+  const px = paletteImg.pixels;
+  return { r: px[idx], g: px[idx + 1], b: px[idx + 2] };
 }
 
 function drawBeamSegs(g, segs, b) {
@@ -563,16 +722,77 @@ function drawHUD(dir) {
   }
 
   if ((params.auto || params.autoPos) && !anyShooting()) {
-    const remain = max(0, (holdUntil - millis()) / 1000);
-    fill(255, 200, 90);
     textAlign(LEFT, CENTER);
-    text('proximo em ' + remain.toFixed(1) + 's  (salve agora!)', bx, by + bh + 48);
+    if (autoPaused) {
+      fill(255, 120, 120);
+      text('AUTO PAUSADO (espaco)', bx, by + bh + 48);
+    } else {
+      const remain = max(0, (holdUntil - millis()) / 1000);
+      fill(255, 200, 90);
+      text('proximo em ' + remain.toFixed(1) + 's  (salve agora!)', bx, by + bh + 48);
+    }
   }
 
-  fill(150);
+  if (params.reactive) {
+    textAlign(LEFT, CENTER);
+    const my = by + bh + 72;
+    if (!reactReady) {
+      fill(255, 120, 120);
+      text('MIC: aguardando permissao / sinal...', bx, my);
+    } else {
+      const lvl = constrain(glowBoost / (params.reactSens || 1), 0, 1);
+      fill(120, 200, 255);
+      text('MIC ativo', bx, my);
+      noStroke();
+      fill(40);
+      rect(bx + 70, my - 5, 80, 10, 3);
+      fill(120, 200, 255);
+      rect(bx + 70, my - 5, 80 * lvl, 10, 3);
+    }
+  }
+
+  fill(130);
   textAlign(LEFT, BOTTOM);
   textStyle(NORMAL);
   textSize(13);
+  text('clique dispara  |  arraste ●  |  H = ajuda  |  painel ↗', 24, height - 18);
+  pop();
+}
+
+// overlay com a lista de atalhos (tecla H)
+function drawHelp() {
+  push();
+  const lines = [
+    'ATALHOS',
+    'S  salvar PNG',
+    'G  gravar GIF (3s)',
+    'N  novo feixe aleatorio',
+    'R  surpreenda-me',
+    'C  limpar teia',
+    'espaco  pausar/continuar auto',
+    'F  tela cheia',
+    'V  modo VJ (sem UI, p/ captura)',
+    'setas ↑/↓  reflexoes',
+    'H  fecha esta ajuda',
+  ];
+  const w = 320, h = 24 + lines.length * 24;
+  const x = width - w - 24, y = height - h - 24;
+  noStroke();
+  fill(0, 200);
+  rect(x, y, w, h, 10);
+  stroke(80);
+  strokeWeight(1);
+  noFill();
+  rect(x, y, w, h, 10);
+  noStroke();
+  textAlign(LEFT, TOP);
+  textStyle(NORMAL);
+  for (let i = 0; i < lines.length; i++) {
+    fill(i === 0 ? color(255, 80, 80) : color(210));
+    textStyle(i === 0 ? BOLD : NORMAL);
+    textSize(i === 0 ? 15 : 13);
+    text(lines[i], x + 18, y + 14 + i * 24);
+  }
   pop();
 }
 
@@ -601,6 +821,42 @@ function mouseDragged() {
 
 function mouseReleased() {
   movingSource = false;
+}
+
+function setVJ(on) {
+  vjMode = on;
+  const el = (pane && pane.element) || document.querySelector('.tp-dfwv');
+  if (el) el.style.display = on ? 'none' : '';
+  if (on) { noCursor(); fullscreen(true); }
+  else { cursor(); fullscreen(false); }
+}
+
+function keyPressed() {
+  const el = document.activeElement;
+  if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) return;
+
+  const k = (key || '').toLowerCase();
+  if (k === 's') { exportPNG(); }
+  else if (k === 'g') { saveGif('laser', 3); }
+  else if (k === 'n') { const a = random(TWO_PI); fireShot(createVector(cos(a), sin(a))); }
+  else if (k === 'r') { surprise(); }
+  else if (k === 'c') { beamLayer.clear(); }
+  else if (k === 'f') { fullscreen(!fullscreen()); }
+  else if (k === 'v') { setVJ(!vjMode); }
+  else if (k === 'h') { showHelp = !showHelp; }
+  else if (key === ' ') { autoPaused = !autoPaused; }
+  else if (keyCode === UP_ARROW) {
+    params.bounces = min(params.bounces + 10, 1200);
+    if (pane) pane.refresh();
+    if (centerDir) fireShot(centerDir);
+  } else if (keyCode === DOWN_ARROW) {
+    params.bounces = max(params.bounces - 10, 2);
+    if (pane) pane.refresh();
+    if (centerDir) fireShot(centerDir);
+  } else {
+    return;
+  }
+  return false;
 }
 
 function pointInPolygon(p) {
