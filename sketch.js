@@ -848,7 +848,7 @@ function drawHelp() {
     'H  fecha esta ajuda',
   ];
   const w = 320, h = 24 + lines.length * 24;
-  const x = width - w - 24, y = height - h - 24;
+  const x = 24, y = height - h - 60;
   noStroke();
   fill(0, 200);
   rect(x, y, w, h, 10);
