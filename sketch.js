@@ -11,6 +11,7 @@ const params = {
   rainbow: false,
   hueSpeed: 12,
   preset: 'Triangulo classico',
+  windowMode: false,
   imgPalette: false,
   sound: false,
   volume: 0.6,
@@ -52,7 +53,7 @@ let ipc = null;
 let lastSyncSnap = '';
 const SYNC_KEYS = ['sides', 'beams', 'speed', 'bounces', 'glow', 'color',
   'rainbow', 'hueSpeed', 'imgPalette', 'auto', 'autoPos', 'autoStep',
-  'holdTime', 'outputAspect'];
+  'holdTime', 'outputAspect', 'windowMode'];
 let audioCtx = null;
 
 // imagem-paleta
@@ -160,6 +161,8 @@ function setupPane() {
 
   // --- Geometria ---
   const fGeo = pane.addFolder({ title: 'Geometria' });
+  fGeo.addBinding(params, 'windowMode', { label: 'Janela inteira' })
+    .on('change', () => { buildTriangle(); emitter.pos = triCentroid(); refire(); });
   fGeo.addBinding(params, 'sides', { min: 3, max: 12, step: 1, label: 'Lados' })
     .on('change', () => { buildTriangle(); emitter.pos = triCentroid(); refire(); });
   fGeo.addBinding(params, 'beams', { min: 1, max: 8, step: 1, label: 'Feixes' })
@@ -365,13 +368,23 @@ function stageRect() {
 
 function buildTriangle() {
   const st = stageRect();
-  const cx = st.x + st.w / 2, cy = st.y + st.h / 2;
-  const R = min(st.w, st.h) * 0.42;
-  const n = max(3, floor(params.sides));
   tri = [];
-  for (let i = 0; i < n; i++) {
-    const a = -HALF_PI + i * TWO_PI / n;
-    tri.push(createVector(cx + R * cos(a), cy + R * sin(a)));
+  if (params.windowMode) {
+    const m = 2;
+    const x0 = st.x + m, y0 = st.y + m;
+    const x1 = st.x + st.w - m, y1 = st.y + st.h - m;
+    tri.push(createVector(x0, y0));
+    tri.push(createVector(x1, y0));
+    tri.push(createVector(x1, y1));
+    tri.push(createVector(x0, y1));
+  } else {
+    const cx = st.x + st.w / 2, cy = st.y + st.h / 2;
+    const R = min(st.w, st.h) * 0.42;
+    const n = max(3, floor(params.sides));
+    for (let i = 0; i < n; i++) {
+      const a = -HALF_PI + i * TWO_PI / n;
+      tri.push(createVector(cx + R * cos(a), cy + R * sin(a)));
+    }
   }
   computePolyBB();
 }
