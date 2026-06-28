@@ -41,6 +41,13 @@ let orbitPeriod = 0;
 let hideUI = false;
 let showHelp = false;
 let vjMode = false;
+let cleanOutput = false;
+let vjRole = null;
+let ipc = null;
+let lastSyncSnap = '';
+const SYNC_KEYS = ['sides', 'beams', 'speed', 'bounces', 'glow', 'color',
+  'rainbow', 'hueSpeed', 'imgPalette', 'auto', 'autoPos', 'autoStep',
+  'holdTime', 'outputAspect'];
 let audioCtx = null;
 
 // imagem-paleta
@@ -55,6 +62,8 @@ let reactReady = false;
 let lastBeat = 0;
 let glowBoost = 0;
 let bassAvg = 0;
+let fAud = null;
+let deviceBlade = null;
 
 let baseRGB = { r: 255, g: 40, b: 40 };
 function refreshColor() {
@@ -80,13 +89,53 @@ function setup() {
   refreshColor();
   fileInput = createFileInput(handleFile);
   fileInput.hide();
+  setupVJLink();
   setupPane();
   fireShot(createVector(0.85, -0.5));
+}
+
+function setupVJLink() {
+  let qp;
+  try { qp = new URLSearchParams(window.location.search); } catch (e) { return; }
+  cleanOutput = qp.has('clean');
+  vjRole = qp.get('role');
+
+  ipc = (typeof window !== 'undefined' && window.vjBridge) ? window.vjBridge : null;
+  if (!ipc) return;
+
+  params.auto = true;
+
+  if (vjRole === 'output') {
+    ipc.on('vj-params', (data) => applyRemoteParams(data));
+  } else if (vjRole === 'controller') {
+    setInterval(broadcastParams, 150);
+  }
+}
+
+function broadcastParams() {
+  const obj = {};
+  for (const k of SYNC_KEYS) obj[k] = params[k];
+  const snap = JSON.stringify(obj);
+  if (snap === lastSyncSnap) return;
+  lastSyncSnap = snap;
+  ipc.send('vj-params', obj);
+}
+
+function applyRemoteParams(data) {
+  if (!data) return;
+  const before = SYNC_KEYS.map((k) => params[k]).join('|');
+  for (const k of SYNC_KEYS) if (data[k] !== undefined) params[k] = data[k];
+  refreshColor();
+  buildTriangle();
+  emitter.pos = triCentroid();
+  const after = SYNC_KEYS.map((k) => params[k]).join('|');
+  if (before !== after && centerDir) fireShot(centerDir);
 }
 
 function setupPane() {
   if (typeof Pane === 'undefined') { setTimeout(setupPane, 50); return; }
   pane = new Pane({ title: 'Controles' });
+  if (cleanOutput && pane.element) pane.element.style.display = 'none';
 
   const refire = () => { if (centerDir) fireShot(centerDir); };
 
@@ -123,13 +172,16 @@ function setupPane() {
   fVis.addButton({ title: 'Carregar imagem...' }).on('click', () => fileInput.elt.click());
 
   // --- Áudio ---
-  const fAud = pane.addFolder({ title: 'Audio' });
+  fAud = pane.addFolder({ title: 'Audio' });
   fAud.addBinding(params, 'sound', { label: 'Som (pings)' })
     .on('change', () => { if (params.sound) ensureAudio(); });
   fAud.addBinding(params, 'volume', { min: 0, max: 1, step: 0.05, label: 'Volume' });
-  fAud.addBinding(params, 'reactive', { label: 'Reativo (mic)' })
+  fAud.addBinding(params, 'reactive', { label: 'Reativo' })
     .on('change', () => { if (params.reactive) startReactive(); else reactReady = false; });
   fAud.addBinding(params, 'reactSens', { min: 0.3, max: 3, step: 0.1, label: 'Sensibilidade' });
+  fAud.addButton({ title: 'Atualizar dispositivos' }).on('click', () => {
+    if (mic) refreshAudioDevices(); else startReactive();
+  });
 
   // --- Automático ---
   const fAuto = pane.addFolder({ title: 'Automatico' });
@@ -407,9 +459,29 @@ function startReactive() {
   if (!mic) { mic = new p5.AudioIn(); fft = new p5.FFT(0.8, 1024); }
   userStartAudio().then(() => {
     mic.start(
-      () => { fft.setInput(mic); reactReady = true; bassAvg = 0; },
+      () => { fft.setInput(mic); reactReady = true; bassAvg = 0; refreshAudioDevices(); },
       () => { console.warn('microfone negado'); reactReady = false; params.reactive = false; if (pane) pane.refresh(); }
     );
+  });
+}
+
+function refreshAudioDevices() {
+  if (!mic || typeof mic.getSources !== 'function' || !fAud) return;
+  mic.getSources((list) => {
+    if (!list || list.length === 0) return;
+    const options = list.map((d, i) => ({
+      text: d.label || ('Entrada ' + (i + 1)), value: i,
+    }));
+    if (deviceBlade) { try { deviceBlade.dispose(); } catch (e) { /* ignore */ } }
+    deviceBlade = fAud.addBlade({
+      view: 'list', label: 'Entrada', options,
+      value: mic.currentSource || 0,
+    });
+    deviceBlade.on('change', (ev) => {
+      mic.setSource(ev.value);
+      mic.stop();
+      mic.start(() => { fft.setInput(mic); reactReady = true; bassAvg = 0; });
+    });
   });
 }
 
@@ -496,7 +568,7 @@ function draw() {
 
   drawLetterbox();
 
-  if (!hideUI && !vjMode) {
+  if (!hideUI && !vjMode && !cleanOutput) {
     drawEmitter();
     drawHUD(dir);
     if (showHelp) drawHelp();
