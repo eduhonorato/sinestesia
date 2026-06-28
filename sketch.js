@@ -237,28 +237,53 @@ function applyPreset(name) {
   fireShot(centerDir || createVector(0.85, -0.5));
 }
 
+const SURPRISE_MAX_SEGS = 300;
+
 function surprise() {
   params.sides = floor(random(3, 9));
-  params.beams = floor(random(1, 7));
-  params.bounces = floor(random(140, 380));
-  params.glow = random(0.8, 1.4);
-  params.rainbow = random() < 0.5;
+  params.beams = floor(random(1, 6));
+  params.rainbow = random() < 0.6;
   if (!params.rainbow) params.color = rgbToHex(hsv(random(360), random(0.7, 1), 1));
   else params.hueSpeed = floor(random(6, 24));
   refreshColor();
   buildTriangle();
 
   const c = triCentroid();
-  const v = tri[floor(random(tri.length))];
-  emitter.pos = p5.Vector.lerp(c, v, random(0, 0.45));
+  if (random() < 0.5) {
+    emitter.pos = c.copy();
+  } else {
+    const v = tri[floor(random(tri.length))];
+    emitter.pos = p5.Vector.lerp(c, v, random(0.08, 0.4));
+  }
 
-  let dir = createVector(1, 0);
-  for (let i = 0; i < 40; i++) {
+  const cands = [];
+  for (let i = 0; i < 360; i++) {
+    const a = random(TWO_PI);
+    const d = createVector(cos(a), sin(a));
+    const period = detectOrbit(emitter.pos, d, 800);
+    if (period >= 4) cands.push({ d, period });
+  }
+
+  const segBudget = floor(SURPRISE_MAX_SEGS / params.beams);
+
+  let dir, period;
+  if (cands.length) {
+    const target = random(8, segBudget);
+    cands.sort((p, q) => abs(p.period - target) - abs(q.period - target));
+    const pick = cands[0];
+    dir = pick.d;
+    period = pick.period;
+  } else {
     const a = random(TWO_PI);
     dir = createVector(cos(a), sin(a));
-    const period = detectOrbit(emitter.pos, dir, min(params.bounces, 600));
-    if (period === 0 || period > 30) break;
+    period = segBudget;
   }
+
+  params.bounces = constrain(min(period, segBudget), 8, SURPRISE_MAX_SEGS);
+
+  const total = params.bounces * params.beams;
+  params.glow = constrain(map(total, 40, SURPRISE_MAX_SEGS, 1.1, 0.6), 0.6, 1.1);
+
   if (pane) pane.refresh();
   fireShot(dir);
 }
