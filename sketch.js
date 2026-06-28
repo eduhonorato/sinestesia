@@ -15,12 +15,17 @@ const params = {
   sound: false,
   volume: 0.6,
   reactive: false,
-  reactSens: 1.2,
+  beatSens: 1.2,
+  bloomReact: 0.3,
   auto: false,
   autoPos: false,
   autoStep: 0.18,
   holdTime: 6,
   outputAspect: 'Livre',
+  reactRegen: true,
+  regenEvery: 2,
+  reactMotion: false,
+  motionAmt: 0.3,
 };
 
 let tri = [];
@@ -61,9 +66,13 @@ let fft = null;
 let reactReady = false;
 let lastBeat = 0;
 let glowBoost = 0;
-let bassAvg = 0;
+let bassHist = [];
 let fAud = null;
+let fReact = null;
 let deviceBlade = null;
+let beatCount = 0;
+let motionAngle = 0;
+let beatPulse = 0;
 
 let baseRGB = { r: 255, g: 40, b: 40 };
 function refreshColor() {
@@ -72,6 +81,8 @@ function refreshColor() {
 }
 
 let pane = null;
+let reactPane = null;
+let reactHost = null;
 
 const PRESETS = {
   'Triangulo classico': { sides: 3, beams: 1, bounces: 130, rainbow: false, color: '#ff2828', glow: 1.0 },
@@ -173,15 +184,16 @@ function setupPane() {
 
   // --- Áudio ---
   fAud = pane.addFolder({ title: 'Audio' });
-  fAud.addBinding(params, 'sound', { label: 'Som (pings)' })
+  fAud.addBinding(params, 'reactive', { label: 'Reage ao som' })
+    .on('change', () => {
+      if (params.reactive) startReactive(); else reactReady = false;
+      updateReactPaneVisibility();
+    });
+  fAud.addBinding(params, 'sound', { label: 'Pings de reflexao' })
     .on('change', () => { if (params.sound) ensureAudio(); });
-  fAud.addBinding(params, 'volume', { min: 0, max: 1, step: 0.05, label: 'Volume' });
-  fAud.addBinding(params, 'reactive', { label: 'Reativo' })
-    .on('change', () => { if (params.reactive) startReactive(); else reactReady = false; });
-  fAud.addBinding(params, 'reactSens', { min: 0.3, max: 3, step: 0.1, label: 'Sensibilidade' });
-  fAud.addButton({ title: 'Atualizar dispositivos' }).on('click', () => {
-    if (mic) refreshAudioDevices(); else startReactive();
-  });
+  fAud.addBinding(params, 'volume', { min: 0, max: 1, step: 0.05, label: 'Volume pings' });
+
+  setupReactPane();
 
   // --- Automático ---
   const fAuto = pane.addFolder({ title: 'Automatico' });
@@ -212,6 +224,34 @@ function setupPane() {
   fExp.addButton({ title: 'Gravar GIF (3s)' }).on('click', () => saveGif('laser', 3));
 }
 
+// pane secundario com as configs de reacao ao som
+function setupReactPane() {
+  reactHost = document.createElement('div');
+  reactHost.style.cssText =
+    'position:fixed; top:8px; right:280px; width:256px; z-index:1000; display:none;';
+  document.body.appendChild(reactHost);
+
+  reactPane = new Pane({ title: 'Reage ao som', container: reactHost });
+  reactPane.addBinding(params, 'reactRegen', { label: 'Gerar nova na batida' });
+  reactPane.addBinding(params, 'beatSens', { min: 0.3, max: 3, step: 0.1, label: 'Detectar batida' });
+  reactPane.addBinding(params, 'bloomReact', { min: 0, max: 3, step: 0.1, label: 'Brilho pulsa' });
+  reactPane.addBinding(params, 'regenEvery', { min: 1, max: 8, step: 1, label: 'A cada N batidas' });
+  reactPane.addBinding(params, 'reactMotion', { label: 'Mover imagem' });
+  reactPane.addBinding(params, 'motionAmt', { min: 0, max: 1.5, step: 0.05, label: 'Forca do movimento' });
+  reactPane.addButton({ title: 'Atualizar dispositivos de audio' }).on('click', () => {
+    if (mic) refreshAudioDevices(); else startReactive();
+  });
+
+  fReact = reactPane;
+  updateReactPaneVisibility();
+}
+
+function updateReactPaneVisibility() {
+  if (!reactHost) return;
+  const show = params.reactive && !cleanOutput && !vjMode;
+  reactHost.style.display = show ? '' : 'none';
+}
+
 function handleFile(file) {
   if (file.type !== 'image') return;
   loadImage(file.data, (img) => {
@@ -239,15 +279,7 @@ function applyPreset(name) {
 
 const SURPRISE_MAX_SEGS = 300;
 
-function surprise() {
-  params.sides = floor(random(3, 9));
-  params.beams = floor(random(1, 6));
-  params.rainbow = random() < 0.6;
-  if (!params.rainbow) params.color = rgbToHex(hsv(random(360), random(0.7, 1), 1));
-  else params.hueSpeed = floor(random(6, 24));
-  refreshColor();
-  buildTriangle();
-
+function placeEmitterRandom() {
   const c = triCentroid();
   if (random() < 0.5) {
     emitter.pos = c.copy();
@@ -255,7 +287,9 @@ function surprise() {
     const v = tri[floor(random(tri.length))];
     emitter.pos = p5.Vector.lerp(c, v, random(0.08, 0.4));
   }
+}
 
+function fireCleanOrbit() {
   const cands = [];
   for (let i = 0; i < 360; i++) {
     const a = random(TWO_PI);
@@ -264,15 +298,14 @@ function surprise() {
     if (period >= 4) cands.push({ d, period });
   }
 
-  const segBudget = floor(SURPRISE_MAX_SEGS / params.beams);
+  const segBudget = floor(SURPRISE_MAX_SEGS / max(1, floor(params.beams)));
 
   let dir, period;
   if (cands.length) {
     const target = random(8, segBudget);
     cands.sort((p, q) => abs(p.period - target) - abs(q.period - target));
-    const pick = cands[0];
-    dir = pick.d;
-    period = pick.period;
+    dir = cands[0].d;
+    period = cands[0].period;
   } else {
     const a = random(TWO_PI);
     dir = createVector(cos(a), sin(a));
@@ -281,11 +314,23 @@ function surprise() {
 
   params.bounces = constrain(min(period, segBudget), 8, SURPRISE_MAX_SEGS);
 
-  const total = params.bounces * params.beams;
+  const total = params.bounces * max(1, floor(params.beams));
   params.glow = constrain(map(total, 40, SURPRISE_MAX_SEGS, 1.1, 0.6), 0.6, 1.1);
 
-  if (pane) pane.refresh();
   fireShot(dir);
+}
+
+function surprise() {
+  params.sides = floor(random(3, 9));
+  params.beams = floor(random(1, 6));
+  params.rainbow = random() < 0.6;
+  if (!params.rainbow) params.color = rgbToHex(hsv(random(360), random(0.7, 1), 1));
+  else params.hueSpeed = floor(random(6, 24));
+  refreshColor();
+  buildTriangle();
+  placeEmitterRandom();
+  fireCleanOrbit();
+  if (pane) pane.refresh();
 }
 
 function exportPNG() {
@@ -484,47 +529,42 @@ function startReactive() {
   if (!mic) { mic = new p5.AudioIn(); fft = new p5.FFT(0.8, 1024); }
   userStartAudio().then(() => {
     mic.start(
-      () => { fft.setInput(mic); reactReady = true; bassAvg = 0; refreshAudioDevices(); },
+      () => { fft.setInput(mic); reactReady = true; bassHist = []; refreshAudioDevices(); },
       () => { console.warn('microfone negado'); reactReady = false; params.reactive = false; if (pane) pane.refresh(); }
     );
   });
 }
 
 function refreshAudioDevices() {
-  if (!mic || typeof mic.getSources !== 'function' || !fAud) return;
+  if (!mic || typeof mic.getSources !== 'function' || !fReact) return;
   mic.getSources((list) => {
     if (!list || list.length === 0) return;
     const options = list.map((d, i) => ({
       text: d.label || ('Entrada ' + (i + 1)), value: i,
     }));
     if (deviceBlade) { try { deviceBlade.dispose(); } catch (e) { /* ignore */ } }
-    deviceBlade = fAud.addBlade({
+    deviceBlade = fReact.addBlade({
       view: 'list', label: 'Entrada', options,
       value: mic.currentSource || 0,
     });
     deviceBlade.on('change', (ev) => {
       mic.setSource(ev.value);
       mic.stop();
-      mic.start(() => { fft.setInput(mic); reactReady = true; bassAvg = 0; });
+      mic.start(() => { fft.setInput(mic); reactReady = true; bassHist = []; });
     });
   });
 }
 
 function updateReactive() {
+  beatPulse = lerp(beatPulse, 0, 0.08); // envelope da batida decai sempre
   if (!params.reactive || !reactReady) { glowBoost = lerp(glowBoost, 0, 0.2); return; }
   try {
     const level = mic.getLevel();
     fft.analyze();
     const bass = fft.getEnergy('bass');
-    bassAvg = lerp(bassAvg, bass, 0.05);
-    const target = map(level, 0, 0.2, 0, 1.8, true) * params.reactSens;
+    const target = map(level, 0, 0.2, 0, 1.8, true) * params.bloomReact;
     glowBoost = lerp(glowBoost, target, 0.25);
-
-    const now = millis();
-    if (bass > bassAvg * 1.35 && bass > 55 && now - lastBeat > 200) {
-      lastBeat = now;
-      onBeat();
-    }
+    if (detectBeat(bass)) onBeat();
   } catch (e) {
     console.warn('reativo falhou:', e);
     reactReady = false;
@@ -532,17 +572,45 @@ function updateReactive() {
   }
 }
 
-function onBeat() {
-  if (!params.rainbow) {
-    const treble = fft.getEnergy('treble');
-    params.color = rgbToHex(hsv(map(treble, 0, 255, 0, 360), 0.9, 1));
-    refreshColor();
-    if (pane) pane.refresh();
+const BASS_HIST = 43;
+function detectBeat(bass) {
+  bassHist.push(bass);
+  if (bassHist.length > BASS_HIST) bassHist.shift();
+  if (bassHist.length < 12) return false;
+
+  let mean = 0;
+  for (const v of bassHist) mean += v;
+  mean /= bassHist.length;
+  let varc = 0;
+  for (const v of bassHist) varc += (v - mean) * (v - mean);
+  const std = sqrt(varc / bassHist.length);
+
+  const k = map(params.beatSens, 0.3, 3, 2.4, 0.3, true);
+  const now = millis();
+  if (bass > mean + k * std && bass > mean * 1.08 && bass > 15 &&
+      now - lastBeat > 160) {
+    lastBeat = now;
+    return true;
   }
-  autoAngle += params.autoStep;
-  const d = createVector(cos(autoAngle), sin(autoAngle));
-  if (params.autoPos) emitter.pos = randomInteriorPos();
-  fireShot(d);
+  return false;
+}
+
+function onBeat() {
+  beatPulse = 1;
+  if (!params.reactRegen) return;
+
+  beatCount++;
+  if (beatCount < max(1, floor(params.regenEvery))) return;
+  beatCount = 0;
+
+  if (random() < 0.5) { params.sides = floor(random(3, 9)); buildTriangle(); }
+  if (random() < 0.5) params.beams = floor(random(1, 6));
+  if (random() < 0.35) params.rainbow = random() < 0.6;
+  if (params.rainbow) params.hueSpeed = floor(random(6, 24));
+  else { params.color = rgbToHex(hsv(random(360), random(0.7, 1), 1)); refreshColor(); }
+  placeEmitterRandom();
+  fireCleanOrbit();
+  if (pane) pane.refresh();
 }
 
 function draw() {
@@ -565,7 +633,6 @@ function draw() {
   }
 
   fxLayer.clear();
-  drawTriangleTo(fxLayer);
   fxLayer.push();
   fxLayer.blendMode(ADD);
   fxLayer.image(beamLayer, 0, 0);
@@ -579,16 +646,36 @@ function draw() {
 
   background(0);
   const ctx = drawingContext;
-  const glowAmt = params.glow + glowBoost;
+  const inten = constrain(glowBoost + beatPulse, 0, 2);
+  const glowAmt = params.glow + glowBoost + beatPulse * 0.7;
+
+  push();
+  if (params.reactMotion && params.motionAmt > 0) {
+    const cx = width / 2, cy = height / 2;
+    motionAngle += (0.003 + inten * 0.012) * params.motionAmt;
+    const breath = 1 + (0.03 * sin(frameCount * 0.04) + 0.2 * inten) * params.motionAmt;
+    translate(cx, cy);
+    rotate(motionAngle);
+    scale(breath);
+    translate(-cx, -cy);
+  }
+
+  drawTriangleMain();
+
   if (glowAmt > 0) {
     ctx.save();
     ctx.filter = 'blur(' + (glowAmt * 7) + 'px)';
     image(fxLayer, 0, 0);
     ctx.restore();
   }
-  push();
   blendMode(ADD);
   image(fxLayer, 0, 0);
+  if (glowAmt > 0 && inten > 0.6) {
+    ctx.save();
+    ctx.filter = 'blur(' + (glowAmt * 14) + 'px)';
+    image(fxLayer, 0, 0);
+    ctx.restore();
+  }
   pop();
 
   drawLetterbox();
@@ -758,15 +845,16 @@ function drawTip(g, segs) {
   g.pop();
 }
 
-function drawTriangleTo(g) {
-  g.push();
-  g.noFill();
-  g.stroke(baseRGB.r * 0.6, baseRGB.g * 0.6, baseRGB.b * 0.6);
-  g.strokeWeight(2);
-  g.beginShape();
-  for (const v of tri) g.vertex(v.x, v.y);
-  g.endShape(CLOSE);
-  g.pop();
+// moldura desenhada direto na tela (nitida, fora do bloom)
+function drawTriangleMain() {
+  push();
+  noFill();
+  stroke(baseRGB.r * 0.6, baseRGB.g * 0.6, baseRGB.b * 0.6);
+  strokeWeight(2);
+  beginShape();
+  for (const v of tri) vertex(v.x, v.y);
+  endShape(CLOSE);
+  pop();
 }
 
 function drawEmitter() {
@@ -837,7 +925,7 @@ function drawHUD(dir) {
       fill(255, 120, 120);
       text('MIC: aguardando permissao / sinal...', bx, my);
     } else {
-      const lvl = constrain(glowBoost / (params.reactSens || 1), 0, 1);
+      const lvl = constrain(glowBoost / (params.bloomReact || 1), 0, 1);
       fill(120, 200, 255);
       text('MIC ativo', bx, my);
       noStroke();
@@ -845,6 +933,8 @@ function drawHUD(dir) {
       rect(bx + 70, my - 5, 80, 10, 3);
       fill(120, 200, 255);
       rect(bx + 70, my - 5, 80 * lvl, 10, 3);
+      fill(255, 80, 80, 255 * beatPulse);
+      circle(bx + 165, my, 8 + 6 * beatPulse);
     }
   }
 
@@ -900,7 +990,8 @@ function isHover(v) {
 
 function mousePressed(event) {
   if (event && event.target && event.target.closest &&
-      event.target.closest('.tp-dfwv')) return;
+      (event.target.closest('.tp-dfwv') ||
+       (reactHost && reactHost.contains(event.target)))) return;
   if (params.sound) ensureAudio();
   if (isHover(emitter.pos)) {
     movingSource = true;
@@ -924,6 +1015,7 @@ function setVJ(on) {
   vjMode = on;
   const el = (pane && pane.element) || document.querySelector('.tp-dfwv');
   if (el) el.style.display = on ? 'none' : '';
+  updateReactPaneVisibility();
   if (on) { noCursor(); fullscreen(true); }
   else { cursor(); fullscreen(false); }
 }
