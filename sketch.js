@@ -199,12 +199,12 @@ function setupPane() {
   fAct.addButton({ title: 'Limpar' }).on('click', () => beamLayer.clear());
 
   // --- Saída (VJ) ---
-  const fOut = pane.addFolder({ title: 'Saida (VJ)' });
-  fOut.addBinding(params, 'outputAspect', {
-    label: 'Aspecto',
-    options: { Livre: 'Livre', '16:9': '16:9', '9:16': '9:16', '1:1': '1:1', '4:3': '4:3' },
-  }).on('change', () => { buildTriangle(); emitter.pos = triCentroid(); if (centerDir) fireShot(centerDir); });
-  fOut.addButton({ title: 'Modo VJ - tela cheia (tecla V)' }).on('click', () => setVJ(!vjMode));
+  // const fOut = pane.addFolder({ title: 'Saida (VJ)' });
+  // fOut.addBinding(params, 'outputAspect', {
+  //   label: 'Aspecto',
+  //   options: { Livre: 'Livre', '16:9': '16:9', '9:16': '9:16', '1:1': '1:1', '4:3': '4:3' },
+  // }).on('change', () => { buildTriangle(); emitter.pos = triCentroid(); if (centerDir) fireShot(centerDir); });
+  // fOut.addButton({ title: 'Modo VJ - tela cheia (tecla V)' }).on('click', () => setVJ(!vjMode));
 
   // --- Exportar ---
   const fExp = pane.addFolder({ title: 'Exportar' });
