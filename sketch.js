@@ -522,14 +522,51 @@ function computeBeamPath(origin, dir, bounces) {
     pt.wall = bestW;
     out.push(pt);
     d = reflect(d, best.normal).normalize();
-    cur = createVector(best.point.x + d.x * NUDGE, best.point.y + d.y * NUDGE);
+    let next = createVector(best.point.x + d.x * NUDGE, best.point.y + d.y * NUDGE);
+    if (!pointInPoly(next)) {
+      d.mult(-1);
+      next = createVector(best.point.x + d.x * NUDGE, best.point.y + d.y * NUDGE);
+    }
+    cur = next;
   }
   return out;
 }
 
+function pointInPoly(p) {
+  let inside = false;
+  for (let i = 0, j = tri.length - 1; i < tri.length; j = i++) {
+    const xi = tri[i].x, yi = tri[i].y, xj = tri[j].x, yj = tri[j].y;
+    const hit = ((yi > p.y) !== (yj > p.y)) &&
+      (p.x < ((xj - xi) * (p.y - yi)) / (yj - yi) + xi);
+    if (hit) inside = !inside;
+  }
+  return inside;
+}
+
+function aimHitsVertex(origin, d) {
+  let best = null;
+  for (const w of triangleWalls()) {
+    const hit = raySegmentIntersect(origin, d, w.a, w.b);
+    if (hit && (best === null || hit.t < best.t)) best = hit;
+  }
+  if (!best) return true;
+  for (const v of tri) {
+    if (dist(best.point.x, best.point.y, v.x, v.y) < 2) return true;
+  }
+  return false;
+}
+
+function avoidVertexAim(origin, d) {
+  let dir = d.copy().normalize();
+  for (let i = 0; i < 12 && aimHitsVertex(origin, dir); i++) {
+    dir.rotate(0.012);
+  }
+  return dir;
+}
+
 function fireShot(dir) {
   if (dir.magSq() < EPS) dir = createVector(1, 0);
-  centerDir = dir.copy().normalize();
+  centerDir = avoidVertexAim(emitter.pos, dir.copy().normalize());
   const n = max(1, floor(params.beams));
   beamLayer.clear();
   beams = [];
@@ -601,7 +638,9 @@ function detectOrbit(origin, dir, maxCheck) {
       return i;
     }
     d = reflect(d, best.normal).normalize();
-    cur = createVector(best.point.x + d.x * NUDGE, best.point.y + d.y * NUDGE);
+    let next = createVector(best.point.x + d.x * NUDGE, best.point.y + d.y * NUDGE);
+    if (!pointInPoly(next)) { d.mult(-1); next = createVector(best.point.x + d.x * NUDGE, best.point.y + d.y * NUDGE); }
+    cur = next;
   }
   return 0;
 }
