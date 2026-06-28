@@ -53,7 +53,9 @@ let ipc = null;
 let lastSyncSnap = '';
 const SYNC_KEYS = ['sides', 'beams', 'speed', 'bounces', 'glow', 'color',
   'rainbow', 'hueSpeed', 'imgPalette', 'auto', 'autoPos', 'autoStep',
-  'holdTime', 'outputAspect', 'windowMode'];
+  'holdTime', 'outputAspect', 'windowMode',
+  'reactive', 'beatSens', 'bloomReact', 'reactRegen', 'regenEvery',
+  'reactMotion', 'motionAmt'];
 let audioCtx = null;
 
 // imagem-paleta
@@ -61,10 +63,13 @@ let paletteImg = null;
 let fileInput = null;
 let polyBB = { minx: 0, miny: 0, maxx: 1, maxy: 1 };
 
-// modo reativo ao som
-let mic = null;
 let fft = null;
+let audioStream = null;
+let sourceNode = null;
+let audioInputs = [];
+let currentDeviceId = null;
 let reactReady = false;
+let reactStarting = false;
 let lastBeat = 0;
 let glowBoost = 0;
 let bassHist = [];
@@ -84,6 +89,10 @@ function refreshColor() {
 let pane = null;
 let reactPane = null;
 let reactHost = null;
+
+let mirrorImg = null;
+let mirrorCanvas = null;
+let mirrorCtx = null;
 
 const PRESETS = {
   'Triangulo classico': { sides: 3, beams: 1, bounces: 130, rainbow: false, color: '#ff2828', glow: 1.0 },
@@ -119,9 +128,23 @@ function setupVJLink() {
 
   if (vjRole === 'output') {
     ipc.on('vj-params', (data) => applyRemoteParams(data));
+    setupMirrorSender();
   } else if (vjRole === 'controller') {
     setInterval(broadcastParams, 150);
+    ipc.on('vj-frame', (url) => {
+      if (!mirrorImg) mirrorImg = new Image();
+      mirrorImg.src = url;
+    });
   }
+}
+
+function setupMirrorSender() {
+  mirrorCanvas = document.createElement('canvas');
+  mirrorCanvas.width = 1280;
+  mirrorCanvas.height = 720;
+  mirrorCtx = mirrorCanvas.getContext('2d');
+  mirrorCtx.imageSmoothingEnabled = true;
+  mirrorCtx.imageSmoothingQuality = 'high';
 }
 
 function broadcastParams() {
@@ -140,6 +163,12 @@ function applyRemoteParams(data) {
   refreshColor();
   buildTriangle();
   emitter.pos = triCentroid();
+
+  if (vjRole === 'output') {
+    if (params.reactive && !reactReady && !reactStarting) startReactive();
+    else if (!params.reactive && reactReady) stopReactive();
+  }
+
   const after = SYNC_KEYS.map((k) => params[k]).join('|');
   if (before !== after && centerDir) fireShot(centerDir);
 }
@@ -189,7 +218,9 @@ function setupPane() {
   fAud = pane.addFolder({ title: 'Audio' });
   fAud.addBinding(params, 'reactive', { label: 'Reage ao som' })
     .on('change', () => {
-      if (params.reactive) startReactive(); else reactReady = false;
+      if (vjRole !== 'controller') {
+        if (params.reactive) startReactive(); else stopReactive();
+      }
       updateReactPaneVisibility();
     });
   fAud.addBinding(params, 'sound', { label: 'Pings de reflexao' })
@@ -241,9 +272,14 @@ function setupReactPane() {
   reactPane.addBinding(params, 'regenEvery', { min: 1, max: 8, step: 1, label: 'A cada N batidas' });
   reactPane.addBinding(params, 'reactMotion', { label: 'Mover imagem' });
   reactPane.addBinding(params, 'motionAmt', { min: 0, max: 1.5, step: 0.05, label: 'Forca do movimento' });
-  reactPane.addButton({ title: 'Atualizar dispositivos de audio' }).on('click', () => {
-    if (mic) refreshAudioDevices(); else startReactive();
-  });
+
+  if (vjRole !== 'controller') {
+    reactPane.addButton({ title: 'Atualizar dispositivos de audio' }).on('click', async () => {
+      if (!reactReady) { startReactive(); return; }
+      try { await ensureAudioInputs(); buildDeviceList(); }
+      catch (e) { console.warn('nao consegui listar dispositivos:', e); }
+    });
+  }
 
   fReact = reactPane;
   updateReactPaneVisibility();
@@ -531,51 +567,104 @@ function detectOrbit(origin, dir, maxCheck) {
   return 0;
 }
 
-function startReactive() {
-  if (typeof p5 === 'undefined' || typeof p5.AudioIn === 'undefined' ||
-      typeof userStartAudio !== 'function') {
-    console.warn('p5.sound não carregou; modo reativo indisponível');
+async function startReactive() {
+  if (reactStarting || reactReady) return;
+  reactStarting = true;
+  try {
+    const ac = (typeof getAudioContext === 'function') ? getAudioContext() : null;
+    if (!ac) throw new Error('AudioContext indisponivel (p5.sound nao carregou)');
+    if (ac.state === 'suspended') { try { await ac.resume(); } catch (e) { /* segue */ } }
+
+    await ensureAudioInputs();
+    await openAudioInput(pickPreferredDevice(), ac);
+    buildDeviceList();
+    reactReady = true;
+  } catch (e) {
+    console.warn('reativo falhou:', e);
     params.reactive = false;
+    reactReady = false;
     if (pane) pane.refresh();
-    return;
+  } finally {
+    reactStarting = false;
   }
-  if (!mic) { mic = new p5.AudioIn(); fft = new p5.FFT(0.8, 1024); }
-  userStartAudio().then(() => {
-    mic.start(
-      () => { fft.setInput(mic); reactReady = true; bassHist = []; refreshAudioDevices(); },
-      () => { console.warn('microfone negado'); reactReady = false; params.reactive = false; if (pane) pane.refresh(); }
-    );
+}
+
+function stopReactive() {
+  reactReady = false;
+  if (sourceNode) { try { sourceNode.disconnect(); } catch (e) { /* ignore */ } sourceNode = null; }
+  if (audioStream) {
+    audioStream.getTracks().forEach((t) => t.stop());
+    audioStream = null;
+  }
+}
+
+async function ensureAudioInputs() {
+  let devs = await navigator.mediaDevices.enumerateDevices();
+  if (!devs.some((d) => d.kind === 'audioinput' && d.label)) {
+    const tmp = await navigator.mediaDevices.getUserMedia({ audio: true });
+    tmp.getTracks().forEach((t) => t.stop());
+    devs = await navigator.mediaDevices.enumerateDevices();
+  }
+  audioInputs = devs.filter((d) => d.kind === 'audioinput')
+    .map((d) => ({ deviceId: d.deviceId, label: d.label || 'Entrada' }));
+}
+
+function pickPreferredDevice() {
+  if (currentDeviceId) return currentDeviceId;
+  const vb = audioInputs.find((d) => /cable|vb-audio|voicemeeter/i.test(d.label));
+  return vb ? vb.deviceId : (audioInputs[0] && audioInputs[0].deviceId) || null;
+}
+
+async function openAudioInput(deviceId, ac) {
+  if (sourceNode) { try { sourceNode.disconnect(); } catch (e) { /* ignore */ } sourceNode = null; }
+  if (audioStream) {
+    audioStream.getTracks().forEach((t) => t.stop());
+    audioStream = null;
+  }
+  const audio = { echoCancellation: false, noiseSuppression: false, autoGainControl: false };
+  if (deviceId) audio.deviceId = { exact: deviceId };
+  audioStream = await navigator.mediaDevices.getUserMedia({ audio });
+
+  const track = audioStream.getAudioTracks()[0];
+  currentDeviceId = deviceId || (track && track.getSettings().deviceId) || null;
+
+  sourceNode = ac.createMediaStreamSource(audioStream);
+  if (!fft) fft = new p5.FFT(0.8, 1024);
+  fft.setInput(sourceNode);
+  bassHist = [];
+}
+
+function buildDeviceList() {
+  if (!fReact) return;
+  if (deviceBlade) { try { deviceBlade.dispose(); } catch (e) { /* ignore */ } }
+  const options = audioInputs.map((d) => ({ text: d.label, value: d.deviceId }));
+  if (options.length === 0) return;
+  deviceBlade = fReact.addBlade({
+    view: 'list', label: 'Entrada', options,
+    value: currentDeviceId || options[0].value,
+  });
+  deviceBlade.on('change', async (ev) => {
+    try { await openAudioInput(ev.value, getAudioContext()); }
+    catch (e) { console.warn('troca de entrada falhou:', e); }
   });
 }
 
-function refreshAudioDevices() {
-  if (!mic || typeof mic.getSources !== 'function' || !fReact) return;
-  mic.getSources((list) => {
-    if (!list || list.length === 0) return;
-    const options = list.map((d, i) => ({
-      text: d.label || ('Entrada ' + (i + 1)), value: i,
-    }));
-    if (deviceBlade) { try { deviceBlade.dispose(); } catch (e) { /* ignore */ } }
-    deviceBlade = fReact.addBlade({
-      view: 'list', label: 'Entrada', options,
-      value: mic.currentSource || 0,
-    });
-    deviceBlade.on('change', (ev) => {
-      mic.setSource(ev.value);
-      mic.stop();
-      mic.start(() => { fft.setInput(mic); reactReady = true; bassHist = []; });
-    });
-  });
+// nivel (RMS) a partir do waveform do FFT
+function fftLevel() {
+  const w = fft.waveform();
+  let s = 0;
+  for (let i = 0; i < w.length; i++) s += w[i] * w[i];
+  return Math.sqrt(s / w.length);
 }
 
 function updateReactive() {
-  beatPulse = lerp(beatPulse, 0, 0.08); // envelope da batida decai sempre
-  if (!params.reactive || !reactReady) { glowBoost = lerp(glowBoost, 0, 0.2); return; }
+  beatPulse = lerp(beatPulse, 0, 0.08);
+  if (!params.reactive || !reactReady || !fft) { glowBoost = lerp(glowBoost, 0, 0.2); return; }
   try {
-    const level = mic.getLevel();
     fft.analyze();
+    const level = fftLevel();
     const bass = fft.getEnergy('bass');
-    const target = map(level, 0, 0.2, 0, 1.8, true) * params.bloomReact;
+    const target = map(level, 0, 0.3, 0, 1.8, true) * params.bloomReact;
     glowBoost = lerp(glowBoost, target, 0.25);
     if (detectBeat(bass)) onBeat();
   } catch (e) {
@@ -627,6 +716,8 @@ function onBeat() {
 }
 
 function draw() {
+  if (vjRole === 'controller') { drawMirror(); return; }
+
   if (vjMode && !fullscreen()) setVJ(false);
   updateReactive();
   updateAuto();
@@ -698,6 +789,33 @@ function draw() {
     drawHUD(dir);
     if (showHelp) drawHelp();
   }
+
+  sendMirrorFrame();
+}
+
+function sendMirrorFrame() {
+  if (vjRole !== 'output' || !ipc || !mirrorCtx) return;
+  if (frameCount % 3 !== 0) return;
+  try {
+    mirrorCtx.drawImage(drawingContext.canvas, 0, 0,
+      mirrorCanvas.width, mirrorCanvas.height);
+    ipc.send('vj-frame', mirrorCanvas.toDataURL('image/jpeg', 0.82));
+  } catch (e) { /* nunca deixar o espelho travar o frame */ }
+}
+
+function drawMirror() {
+  background(0);
+  if (!mirrorImg || !mirrorImg.complete || !mirrorImg.naturalWidth) {
+    fill(150);
+    textAlign(CENTER, CENTER);
+    textSize(16);
+    text('aguardando a saida (Resolume)...', width / 2, height / 2);
+    return;
+  }
+  const ar = mirrorImg.naturalWidth / mirrorImg.naturalHeight;
+  let w = width, h = width / ar;
+  if (h > height) { h = height; w = height * ar; }
+  drawingContext.drawImage(mirrorImg, (width - w) / 2, (height - h) / 2, w, h);
 }
 
 function drawLetterbox() {
@@ -858,7 +976,6 @@ function drawTip(g, segs) {
   g.pop();
 }
 
-// moldura desenhada direto na tela (nitida, fora do bloom)
 function drawTriangleMain() {
   push();
   noFill();
@@ -936,18 +1053,18 @@ function drawHUD(dir) {
     const my = by + bh + 72;
     if (!reactReady) {
       fill(255, 120, 120);
-      text('MIC: aguardando permissao / sinal...', bx, my);
+      text('AUDIO: aguardando permissao / sinal...', bx, my);
     } else {
       const lvl = constrain(glowBoost / (params.bloomReact || 1), 0, 1);
       fill(120, 200, 255);
-      text('MIC ativo', bx, my);
+      text('AUDIO ativo', bx, my);
       noStroke();
       fill(40);
-      rect(bx + 70, my - 5, 80, 10, 3);
+      rect(bx + 80, my - 5, 80, 10, 3);
       fill(120, 200, 255);
-      rect(bx + 70, my - 5, 80 * lvl, 10, 3);
+      rect(bx + 80, my - 5, 80 * lvl, 10, 3);
       fill(255, 80, 80, 255 * beatPulse);
-      circle(bx + 165, my, 8 + 6 * beatPulse);
+      circle(bx + 175, my, 8 + 6 * beatPulse);
     }
   }
 

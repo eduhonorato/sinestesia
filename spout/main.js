@@ -2,6 +2,8 @@ const { app, BrowserWindow, ipcMain, session } = require('electron');
 const path = require('path');
 const { TextureSender, sendTextureFromPaintEvent } = require('@napolab/texture-bridge-core');
 
+app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
+
 const WIDTH = 1920;
 const HEIGHT = 1080;
 const FPS = 60;
@@ -74,11 +76,18 @@ ipcMain.on('vj-params', (event, data) => {
   if (outWin && !outWin.isDestroyed()) outWin.webContents.send('vj-params', data);
 });
 
+ipcMain.on('vj-frame', (event, data) => {
+  if (previewWin && !previewWin.isDestroyed()) previewWin.webContents.send('vj-frame', data);
+});
+
 app.whenReady().then(() => {
-  // libera o acesso ao microfone/loopback (Electron bloqueia por padrao)
-  session.defaultSession.setPermissionRequestHandler((wc, permission, cb) => cb(true));
-  if (session.defaultSession.setPermissionCheckHandler) {
-    session.defaultSession.setPermissionCheckHandler(() => true);
+  const ses = session.defaultSession;
+  ses.setPermissionRequestHandler((wc, permission, cb) => cb(true));
+  if (ses.setPermissionCheckHandler) {
+    ses.setPermissionCheckHandler(() => true);
+  }
+  if (ses.setDevicePermissionHandler) {
+    ses.setDevicePermissionHandler(() => true);
   }
   createOutput();
   if (SHOW_PREVIEW) createPreview();
