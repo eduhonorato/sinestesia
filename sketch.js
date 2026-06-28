@@ -102,6 +102,7 @@ const PRESETS = {
 };
 
 function setup() {
+  pixelDensity(min(displayDensity(), 2));
   createCanvas(windowWidth, windowHeight);
   beamLayer = createGraphics(width, height);
   fxLayer = createGraphics(width, height);
@@ -178,6 +179,10 @@ function setupPane() {
   pane = new Pane({ title: 'Controles' });
   if (cleanOutput && pane.element) pane.element.style.display = 'none';
 
+  // em telas estreitas as pastas comecam recolhidas p/ nao cobrir a arte
+  const small = window.innerWidth < 720;
+  const exp = !small;
+
   const refire = () => { if (centerDir) fireShot(centerDir); };
 
   // --- Presets ---
@@ -189,7 +194,7 @@ function setupPane() {
   fPre.addButton({ title: 'Surpreenda-me' }).on('click', surprise);
 
   // --- Geometria ---
-  const fGeo = pane.addFolder({ title: 'Geometria' });
+  const fGeo = pane.addFolder({ title: 'Geometria', expanded: exp });
   fGeo.addBinding(params, 'windowMode', { label: 'Janela inteira' })
     .on('change', () => { buildTriangle(); emitter.pos = triCentroid(); refire(); });
   fGeo.addBinding(params, 'sides', { min: 3, max: 12, step: 1, label: 'Lados' })
@@ -198,13 +203,13 @@ function setupPane() {
     .on('change', refire);
 
   // --- Animação ---
-  const fAnim = pane.addFolder({ title: 'Animacao' });
+  const fAnim = pane.addFolder({ title: 'Animacao', expanded: exp });
   fAnim.addBinding(params, 'speed', { min: 0.005, max: 0.4, step: 0.005, label: 'Velocidade' });
   fAnim.addBinding(params, 'bounces', { min: 2, max: 1200, step: 1, label: 'Reflexoes' })
     .on('change', refire);
 
   // --- Visual ---
-  const fVis = pane.addFolder({ title: 'Visual' });
+  const fVis = pane.addFolder({ title: 'Visual', expanded: exp });
   fVis.addBinding(params, 'glow', { min: 0, max: 2, step: 0.05, label: 'Brilho' });
   fVis.addBinding(params, 'color', { label: 'Cor' })
     .on('change', () => { refreshColor(); refire(); });
@@ -215,7 +220,7 @@ function setupPane() {
   fVis.addButton({ title: 'Carregar imagem...' }).on('click', () => fileInput.elt.click());
 
   // --- Áudio ---
-  fAud = pane.addFolder({ title: 'Audio' });
+  fAud = pane.addFolder({ title: 'Audio', expanded: exp });
   fAud.addBinding(params, 'reactive', { label: 'Reage ao som' })
     .on('change', () => {
       if (vjRole !== 'controller') {
@@ -230,14 +235,14 @@ function setupPane() {
   setupReactPane();
 
   // --- Automático ---
-  const fAuto = pane.addFolder({ title: 'Automatico' });
+  const fAuto = pane.addFolder({ title: 'Automatico', expanded: exp });
   fAuto.addBinding(params, 'auto', { label: 'Girar' });
   fAuto.addBinding(params, 'autoPos', { label: 'Posicionar' });
   fAuto.addBinding(params, 'autoStep', { min: 0.02, max: 0.6, step: 0.01, label: 'Passo giro' });
   fAuto.addBinding(params, 'holdTime', { min: 1, max: 15, step: 0.5, label: 'Pausa (s)' });
 
   // --- Ações ---
-  const fAct = pane.addFolder({ title: 'Acoes' });
+  const fAct = pane.addFolder({ title: 'Acoes', expanded: exp });
   fAct.addButton({ title: 'Novo feixe aleatorio' }).on('click', () => {
     const a = random(TWO_PI);
     fireShot(createVector(cos(a), sin(a)));
@@ -245,7 +250,7 @@ function setupPane() {
   fAct.addButton({ title: 'Limpar' }).on('click', () => beamLayer.clear());
 
   // --- Saída (VJ) ---
-  const fOut = pane.addFolder({ title: 'Saida (VJ)' });
+  const fOut = pane.addFolder({ title: 'Saida (VJ)', expanded: exp });
   fOut.addBinding(params, 'outputAspect', {
     label: 'Aspecto',
     options: { Livre: 'Livre', '16:9': '16:9', '9:16': '9:16', '1:1': '1:1', '4:3': '4:3' },
@@ -253,9 +258,42 @@ function setupPane() {
   fOut.addButton({ title: 'Modo VJ - tela cheia (tecla V)' }).on('click', () => setVJ(!vjMode));
 
   // --- Exportar ---
-  const fExp = pane.addFolder({ title: 'Exportar' });
+  const fExp = pane.addFolder({ title: 'Exportar', expanded: exp });
   fExp.addButton({ title: 'Salvar PNG' }).on('click', exportPNG);
   fExp.addButton({ title: 'Gravar GIF (3s)' }).on('click', () => saveGif('laser', 3));
+
+  layoutPanes();
+}
+
+// ajusta largura/posicao dos panes conforme a tela (responsivo p/ mobile)
+function layoutPanes() {
+  const W = window.innerWidth, H = window.innerHeight;
+  const small = W < 720;
+  const mainWrap = document.querySelector('.tp-dfwv');
+  const paneW = small ? Math.max(180, Math.min(240, W - 16)) : 256;
+
+  if (mainWrap) {
+    mainWrap.style.width = paneW + 'px';
+    mainWrap.style.maxHeight = (H - 16) + 'px';
+    mainWrap.style.overflowY = 'auto';
+  }
+  if (reactHost) {
+    reactHost.style.maxHeight = (H - 16) + 'px';
+    reactHost.style.overflowY = 'auto';
+    reactHost.style.width = (small ? paneW : 256) + 'px';
+    if (small) {
+      // sem espaco lado a lado: joga o pane reativo p/ o canto inferior esquerdo
+      reactHost.style.right = 'auto';
+      reactHost.style.left = '8px';
+      reactHost.style.top = 'auto';
+      reactHost.style.bottom = '8px';
+    } else {
+      reactHost.style.left = 'auto';
+      reactHost.style.bottom = 'auto';
+      reactHost.style.right = (paneW + 24) + 'px';
+      reactHost.style.top = '8px';
+    }
+  }
 }
 
 // pane secundario com as configs de reacao ao som
@@ -390,6 +428,7 @@ function windowResized() {
   emitter.pos = p5.Vector.add(triCentroid(), dPos);
   clampInside(emitter.pos);
   if (centerDir) fireShot(centerDir);
+  layoutPanes();
 }
 
 //  Geometria
@@ -1072,7 +1111,7 @@ function drawHUD(dir) {
   textAlign(LEFT, BOTTOM);
   textStyle(NORMAL);
   textSize(13);
-  text('clique dispara  |  arraste ●  |  H = ajuda  |  painel ↗', 24, height - 18);
+  text('toque dispara  |  arraste ●  |  painel ↗', 24, height - 18);
   pop();
 }
 
@@ -1118,10 +1157,14 @@ function isHover(v) {
   return dist(mouseX, mouseY, v.x, v.y) < 18;
 }
 
-function mousePressed(event) {
-  if (event && event.target && event.target.closest &&
-      (event.target.closest('.tp-dfwv') ||
-       (reactHost && reactHost.contains(event.target)))) return;
+// clique/toque esta sobre algum pane? (nao deve disparar feixe)
+function overUI(event) {
+  const t = event && event.target;
+  if (!t || !t.closest) return false;
+  return !!t.closest('.tp-dfwv') || (reactHost && reactHost.contains(t));
+}
+
+function pointerPress() {
   if (params.sound) ensureAudio();
   if (isHover(emitter.pos)) {
     movingSource = true;
@@ -1130,15 +1173,38 @@ function mousePressed(event) {
   }
 }
 
-function mouseDragged() {
+function pointerDrag() {
   if (movingSource) {
     emitter.pos.set(mouseX, mouseY);
     clampInside(emitter.pos);
   }
 }
 
-function mouseReleased() {
+function mousePressed(event) {
+  if (overUI(event)) return;
+  pointerPress();
+}
+
+function mouseDragged() { pointerDrag(); }
+
+function mouseReleased() { movingSource = false; }
+
+function touchStarted(event) {
+  if (overUI(event)) return true;
+  pointerPress();
+  return false;
+}
+
+function touchMoved(event) {
+  if (overUI(event)) return true;
+  pointerDrag();
+  return false;
+}
+
+function touchEnded(event) {
+  if (overUI(event)) return true;
   movingSource = false;
+  return false;
 }
 
 function setVJ(on) {

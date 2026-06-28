@@ -2,7 +2,7 @@
 <html lang="pt-br">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
   <title>Sinestesia</title>
   <style>
     html, body {
@@ -12,8 +12,10 @@
       overflow: hidden;
       width: 100%;
       height: 100%;
+      overscroll-behavior: none;
+      -webkit-tap-highlight-color: transparent;
     }
-    canvas { display: block; }
+    canvas { display: block; touch-action: none; }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/p5@1.9.0/lib/p5.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/p5@1.9.0/lib/addons/p5.sound.min.js"></script>
