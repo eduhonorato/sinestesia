@@ -31,6 +31,10 @@ Por usar a API de áudio do navegador (`MediaDevices`), o projeto exige um conte
 
 <img width="1794" height="979" alt="image" src="https://github.com/user-attachments/assets/50969f82-a344-4bec-88a8-55d76e659be0" />
 
+## Exemplo de geração a partir de áudio
+
+https://github.com/user-attachments/assets/09d76f29-dbac-4b3b-9531-b8dbbda05a9b
+
 ## Exemplos de imagens geradas
 
 <img width="1920" height="945" alt="laser-339" src="https://github.com/user-attachments/assets/bfd8cb79-dfc2-4e70-8926-73b56c1f4235" />
